@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import type { DeviceKind, DiffLine, LanguageDraft, ScriptStatus, Segment } from '~/types'
-import { LANGUAGES, useScriptStore } from '~/stores/script'
+import type { DeviceKind, DiffLine, LanguageDraft, ScriptStatus, Segment, SyncReportItem } from '~/types'
+import { LANGUAGES, MASTER_LANGUAGE_ID, useScriptStore } from '~/stores/script'
 
 const store = useScriptStore()
 const activeTab = ref('editor')
@@ -17,6 +17,7 @@ const statusOptions: Array<{ value: ScriptStatus; label: string; color: string }
   { value: 'draft', label: '草稿', color: 'grey' },
   { value: 'review', label: '待审', color: 'warning' },
   { value: 'returned', label: '退回', color: 'error' },
+  { value: 'sync', label: '待同步', color: 'orange-darken-2' },
   { value: 'approved', label: '已定稿', color: 'success' }
 ]
 const deviceOptions: Array<{ value: DeviceKind; label: string }> = [
@@ -30,6 +31,40 @@ const draft = computed(() => store.selectedDraft)
 const exhibit = computed(() => store.selectedExhibit)
 const currentLanguage = computed(() => LANGUAGES.find(item => item.id === store.selectedLanguageId))
 const currentStatus = computed(() => statusOptions.find(item => item.value === draft.value?.status) || statusOptions[0])
+const isZh = computed(() => store.selectedLanguageId === MASTER_LANGUAGE_ID)
+const syncReport = computed(() => store.syncReportFor(exhibit.value, draft.value))
+const isSyncDraft = computed(() => draft.value?.status === 'sync')
+const remainingSyncCount = computed(() => {
+  const report = syncReport.value
+  if (!report) return 0
+  return report.pendingCount + (report.changedFields.length > 0 && !report.fieldsConfirmed ? 1 : 0)
+})
+// 待同步是系统驱动的状态，不能在下拉里手动选入；待同步稿在同步完成前也不能直接定稿
+const selectableStatuses = computed(() => statusOptions.filter(option => option.value !== 'sync' && !(isSyncDraft.value && option.value === 'approved')))
+const zhSyncLanguages = computed(() => {
+  if (!exhibit.value) return []
+  return store.syncPendingPairs(exhibit.value)
+    .map(pair => ({ ...pair, language: LANGUAGES.find(item => item.id === pair.languageId)! }))
+    .filter(pair => pair.language)
+})
+function syncPairFor(languageId: string) {
+  return zhSyncLanguages.value.find(pair => pair.languageId === languageId)
+}
+function segmentIsPending(segmentId?: string): boolean {
+  if (!segmentId || !syncReport.value) return false
+  return syncReport.value.items.some(item => item.pairId === segmentId && !item.confirmed)
+}
+function segmentKept(segmentId?: string): boolean {
+  if (!segmentId || !syncReport.value) return false
+  return syncReport.value.items.some(item => item.pairId === segmentId && item.kind === 'kept')
+}
+function jumpLanguage(languageId: string) {
+  store.selectLanguage(languageId)
+  activeTab.value = 'editor'
+}
+function syncItemKindLabel(item: SyncReportItem) {
+  return ({ changed: '中文已修改', added: '中文新增段', removed: '中文已删除', kept: '锁定保留' })[item.kind]
+}
 const filteredExhibits = computed(() => store.hallExhibits.filter(item => !leftFilter.value || `${item.code} ${item.title}`.toLowerCase().includes(leftFilter.value.toLowerCase())))
 const versions = computed(() => store.versions.filter(item => item.exhibitId === store.selectedExhibitId && item.languageId === store.selectedLanguageId))
 const selectedVersionA = computed(() => versions.value.find(item => item.id === compareA.value))
@@ -153,7 +188,20 @@ function segmentLabel(segment: Segment) { return segment.label || '未命名段�
           >
             <template #prepend><v-chip size="small" variant="outlined">{{ item.code }}</v-chip></template>
             <v-list-item-title class="font-weight-medium">{{ item.title }}</v-list-item-title>
-            <v-list-item-subtitle>{{ item.drafts.length }} 种语言</v-list-item-subtitle>
+            <v-list-item-subtitle>
+              {{ item.drafts.length }} 种语言 · 主稿 v{{ item.masterVersion }}
+              <v-chip
+                v-for="pair in store.syncPendingPairs(item)"
+                :key="pair.languageId"
+                color="orange-darken-2"
+                size="x-small"
+                variant="tonal"
+                class="ms-1 sync-badge"
+                @click.stop="store.selectExhibit(item.id); jumpLanguage(pair.languageId)"
+              >
+                {{ LANGUAGES.find(lang => lang.id === pair.languageId)?.shortLabel }} 待同步 {{ pair.count }}
+              </v-chip>
+            </v-list-item-subtitle>
           </v-list-item>
         </v-list>
       </div>
@@ -164,7 +212,10 @@ function segmentLabel(segment: Segment) { return segment.label || '未命名段�
           <button class="d-flex align-center w-100 border-0 bg-transparent text-left pa-0" :aria-pressed="lang.id === store.selectedLanguageId" @click="store.selectLanguage(lang.id)">
             <v-avatar size="32" :color="lang.id === store.selectedLanguageId ? 'primary' : 'grey-lighten-2'" :class="lang.id === store.selectedLanguageId ? 'text-white' : ''">{{ lang.shortLabel }}</v-avatar>
             <div class="ms-3 flex-grow-1">
-              <div class="text-body-2 font-weight-medium">{{ lang.label }}</div>
+              <div class="text-body-2 font-weight-medium d-flex align-center ga-1">
+                {{ lang.label }}
+                <v-chip v-if="syncPairFor(lang.id)" color="orange-darken-2" size="x-small" variant="tonal" density="comfortable">待同步 {{ syncPairFor(lang.id)?.count }}</v-chip>
+              </div>
               <v-progress-linear class="mt-1" :model-value="exhibit ? store.completionFor(exhibit, lang.id) : 0" :color="lang.id === store.selectedLanguageId ? 'primary' : 'secondary'" height="5" rounded />
             </div>
             <span class="text-caption ms-3">{{ exhibit ? store.completionFor(exhibit, lang.id) : 0 }}%</span>
@@ -178,10 +229,16 @@ function segmentLabel(segment: Segment) { return segment.label || '未命名段�
         <div class="d-flex flex-wrap align-start justify-space-between ga-4 mb-5">
           <div>
             <div class="text-caption text-medium-emphasis mb-1">{{ store.selectedHall?.name }} / {{ exhibit?.code }}</div>
-            <h1 class="text-h4 font-weight-bold project-mark">{{ exhibit?.title || '请选择展项' }}</h1>
+            <h1 class="text-h4 font-weight-bold project-mark d-flex align-center ga-3 flex-wrap">
+              {{ exhibit?.title || '请选择展项' }}
+              <v-chip v-if="exhibit && isZh" color="primary" variant="tonal" size="small" prepend-icon="mdi-source-branch">
+                中文主稿 v{{ exhibit.masterVersion }}
+              </v-chip>
+            </h1>
             <div class="text-body-2 text-medium-emphasis mt-2">
               当前语言：{{ currentLanguage?.label }} ·
               {{ draft?.updatedAt ? `最后更新 ${formatTime(draft.updatedAt)}` : '尚未建立文稿' }}
+              <template v-if="!isZh && draft?.masterRef"> · 挂钩主稿 v{{ draft.masterRef.version }}</template>
             </div>
           </div>
           <div class="d-flex ga-2">
@@ -192,6 +249,42 @@ function segmentLabel(segment: Segment) { return segment.label || '未命名段�
         </div>
 
         <v-alert v-if="store.notice" class="mb-4" color="secondary" variant="tonal" closable @click:close="store.notice = ''">{{ store.notice }}</v-alert>
+
+        <!-- 查看中文主稿时：哪些语言因主稿变动而待同步 -->
+        <v-alert
+          v-if="isZh && zhSyncLanguages.length"
+          class="mb-4"
+          color="orange-darken-2"
+          variant="tonal"
+          icon="mdi-sync-alert"
+          title="已有定稿译文与中文主稿不一致"
+          text="下列语言已转为待同步，译文内容保留；需逐段确认后才能重新定稿。"
+        >
+          <div class="d-flex flex-wrap ga-2 mt-2">
+            <v-chip
+              v-for="pair in zhSyncLanguages"
+              :key="pair.languageId"
+              color="orange-darken-2"
+              variant="tonal"
+              size="small"
+              prepend-icon="mdi-arrow-right"
+              @click="jumpLanguage(pair.languageId)"
+            >
+              {{ pair.language.label }} · {{ pair.count }} 段待处理
+            </v-chip>
+          </div>
+        </v-alert>
+
+        <!-- 查看待同步译稿时：顶部醒目状态条 -->
+        <v-alert
+          v-else-if="isSyncDraft && syncReport"
+          class="mb-4"
+          color="orange-darken-2"
+          variant="tonal"
+          icon="mdi-sync-circle"
+          :title="`译文基于中文主稿 v${syncReport.refVersion} 定稿，主稿已更新到 v${syncReport.masterVersion}`"
+          :text="`译文内容已原样保留。共 ${syncReport.items.length} 段不一致，其中 ${syncReport.pendingCount} 段待处理${syncReport.keptCount ? `、${syncReport.keptCount} 段因锁定保留原文` : ''}；全部确认后可重新定稿。`"
+        />
 
         <v-tabs v-model="activeTab" color="primary" bg-color="surface" rounded="lg" class="mb-4 px-2">
           <v-tab value="editor">脚本编辑</v-tab>
@@ -214,7 +307,7 @@ function segmentLabel(segment: Segment) { return segment.label || '未命名段�
                       <div class="d-flex flex-wrap ga-2">
                         <v-select
                           :model-value="draft.status"
-                          :items="statusOptions"
+                          :items="selectableStatuses"
                           item-title="label"
                           item-value="value"
                           label="审校状态"
@@ -225,6 +318,83 @@ function segmentLabel(segment: Segment) { return segment.label || '未命名段�
                         <v-btn color="primary" variant="tonal" prepend-icon="mdi-plus" @click="store.addSegment">新增段落</v-btn>
                       </div>
                     </div>
+
+                    <!-- 待同步：与中文主稿不一致的字段与段落 -->
+                    <v-card v-if="syncReport && isSyncDraft" class="sync-panel mb-5 pa-4" :class="{ 'sync-panel-done': syncReport.canFinalize }">
+                      <div class="d-flex flex-wrap align-center justify-space-between ga-3 mb-3">
+                        <div>
+                          <div class="section-title text-orange-darken-3">中文主稿同步清单</div>
+                          <div class="text-body-2 mt-1">
+                            对照当前中文主稿 v{{ syncReport.masterVersion }} 逐条处理；锁定段落保留原译文，只需核对未锁定段落。
+                          </div>
+                        </div>
+                        <v-btn
+                          color="success"
+                          variant="flat"
+                          prepend-icon="mdi-check-decagram"
+                          :disabled="!syncReport.canFinalize"
+                          @click="store.finalizeSync()"
+                        >
+                          {{ syncReport.canFinalize ? '全部一致，重新定稿' : `还剩 ${remainingSyncCount} 项待确认` }}
+                        </v-btn>
+                      </div>
+
+                      <v-alert
+                        v-if="syncReport.changedFields.length"
+                        type="warning"
+                        variant="tonal"
+                        density="compact"
+                        class="mb-3"
+                        title="主稿字段也有更新，请核对上方字段后确认"
+                      >
+                        <div class="d-flex flex-wrap align-center ga-2 mt-1">
+                          <v-chip v-for="change in syncReport.changedFields" :key="change.field" size="small" variant="tonal" color="warning">
+                            {{ change.label }}：{{ change.old }} → {{ change.current }}
+                          </v-chip>
+                          <v-btn
+                            size="small"
+                            :color="syncReport.fieldsConfirmed ? 'success' : 'primary'"
+                            variant="tonal"
+                            :prepend-icon="syncReport.fieldsConfirmed ? 'mdi-check' : 'mdi-check-outline'"
+                            @click="store.confirmSyncFields()"
+                          >
+                            {{ syncReport.fieldsConfirmed ? '字段已核对' : '字段已核对，确认' }}
+                          </v-btn>
+                        </div>
+                      </v-alert>
+
+                      <div class="d-flex flex-column ga-3">
+                        <div v-for="item in syncReport.items" :key="item.key" class="sync-item pa-3 rounded-lg" :class="`sync-item-${item.kind}`">
+                          <div class="d-flex align-center ga-2 flex-wrap">
+                            <v-chip size="x-small" :color="item.confirmed ? 'success' : 'orange-darken-2'" variant="tonal">{{ syncItemKindLabel(item) }}</v-chip>
+                            <span class="font-weight-medium">{{ item.label || '未命名段落' }}</span>
+                            <v-chip v-if="item.kind === 'kept'" color="success" size="x-small" variant="tonal" prepend-icon="mdi-lock">译文锁定，保留原内容</v-chip>
+                            <v-chip v-else-if="item.confirmed" color="success" size="x-small" variant="tonal" prepend-icon="mdi-check">已确认</v-chip>
+                            <v-spacer />
+                            <v-btn
+                              v-if="!item.confirmed"
+                              size="small"
+                              color="primary"
+                              variant="tonal"
+                              prepend-icon="mdi-check"
+                              @click="store.confirmSyncItem(item.key)"
+                            >
+                              确认本段
+                            </v-btn>
+                          </div>
+                          <div class="d-flex flex-column flex-md-row ga-3 mt-2">
+                            <div v-if="item.kind !== 'added'" class="flex-grow-1 sync-text-block">
+                              <div class="text-caption text-medium-emphasis mb-1">定稿时中文（v{{ syncReport.refVersion }}）</div>
+                              <p class="text-body-2 mb-0">{{ item.oldContent }}</p>
+                            </div>
+                            <div class="flex-grow-1 sync-text-block">
+                              <div class="text-caption text-medium-emphasis mb-1">{{ item.kind === 'removed' ? '当前中文主稿（该段已删除）' : `当前中文主稿 v${syncReport.masterVersion}` }}</div>
+                              <p class="text-body-2 mb-0">{{ item.kind === 'removed' ? '（中文稿中已删除此段，请确认译文是否同步删除或保留）' : item.zhContent }}</p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </v-card>
 
                     <v-text-field label="展项标题" :model-value="draft.title" hint="面向观众的主标题" persistent-hint @change="saveDraftField('title', $event)" />
                     <v-row class="mt-2">
@@ -252,13 +422,14 @@ function segmentLabel(segment: Segment) { return segment.label || '未命名段�
                       <v-chip variant="tonal">{{ draft.segments.filter(item => item.locked).length }}/{{ draft.segments.length }} 已锁定</v-chip>
                     </div>
                     <div class="d-flex flex-column ga-3">
-                      <div v-for="(segment, index) in draft.segments" :key="segment.id" class="segment-row" :class="{ locked: segment.locked }">
+                      <div v-for="(segment, index) in draft.segments" :key="segment.id" class="segment-row" :class="{ locked: segment.locked, 'sync-pending': segmentIsPending(segment.id), 'sync-kept': segmentKept(segment.id) }">
                         <div class="d-flex align-center ga-2">
                           <v-btn icon size="small" variant="text" :aria-label="segment.locked ? '解锁段落' : '锁定段落'" @click="store.toggleLock(segment.id)">
                             {{ segment.locked ? '🔒' : '🔓' }}
                           </v-btn>
                           <v-text-field :model-value="segment.label" density="compact" hide-details variant="plain" :readonly="segment.locked" :aria-label="`第 ${index + 1} 段标题`" @change="saveSegment(segment.id, 'label', $event)" />
                           <v-chip v-if="segment.locked" color="success" size="small" variant="tonal">已确认</v-chip>
+                          <v-chip v-if="segmentIsPending(segment.id)" color="orange-darken-2" size="small" variant="tonal" prepend-icon="mdi-sync-alert">待同步</v-chip>
                           <v-btn icon="mdi-delete-outline" size="small" variant="text" color="error" :disabled="segment.locked" :aria-label="`删除第 ${index + 1} 段`" @click="deleteTarget = segment.id" />
                         </div>
                         <v-textarea class="mt-2" :model-value="segment.content" rows="2" auto-grow hide-details :readonly="segment.locked" :aria-label="segmentLabel(segment)" @change="saveSegment(segment.id, 'content', $event)" />
@@ -275,9 +446,15 @@ function segmentLabel(segment: Segment) { return segment.label || '未命名段�
                         {{ store.completionFor(exhibit!, lang.id) }}
                       </v-progress-circular>
                       <div class="flex-grow-1">
-                        <div class="font-weight-medium">{{ lang.label }}</div>
+                        <div class="font-weight-medium d-flex align-center ga-1 flex-wrap">
+                          {{ lang.label }}
+                          <v-chip v-if="syncPairFor(lang.id)" color="orange-darken-2" size="x-small" variant="tonal">待同步 {{ syncPairFor(lang.id)?.count }}</v-chip>
+                        </div>
                         <div class="text-caption text-medium-emphasis">
                           {{ exhibit?.drafts.find(item => item.languageId === lang.id) ? store.statusLabel(exhibit!.drafts.find(item => item.languageId === lang.id)!.status) : '尚未创建' }}
+                          <template v-if="lang.id !== 'zh' && exhibit?.drafts.find(item => item.languageId === lang.id)?.masterRef">
+                            · 主稿 v{{ exhibit!.drafts.find(item => item.languageId === lang.id)!.masterRef!.version }}
+                          </template>
                         </div>
                       </div>
                       <v-btn size="small" variant="text" :disabled="lang.id === store.selectedLanguageId" @click="store.selectLanguage(lang.id)">切换</v-btn>
@@ -412,6 +589,8 @@ function segmentLabel(segment: Segment) { return segment.label || '未命名段�
             <v-list-item prepend-icon="mdi-content-save-outline" title="Ctrl / ⌘ + S" subtitle="保存当前版本快照" />
             <v-list-item prepend-icon="mdi-keyboard-tab" title="Tab / Shift + Tab" subtitle="在字段、状态与段落操作之间移动" />
           </v-list>
+          <v-divider class="my-3" />
+          <v-list-item prepend-icon="mdi-sync-circle" title="主稿版本与待同步" subtitle="译文定稿时自动挂钩当前中文主稿版本；已定稿中文稿改动后，中文稿回到待审、已定稿译文转为待同步，需逐段确认后才能重新定稿。锁定段落保留原译文。" />
         </v-card-text>
         <v-card-actions><v-spacer /><v-btn color="primary" @click="helpDialog = false">知道了</v-btn></v-card-actions>
       </v-card>
