@@ -11,6 +11,15 @@ body { margin: 0; background: #f4f0e8; }
 .script-card { border: 1px solid rgba(45,38,32,.1) !important; }
 .segment-row { border: 1px solid rgba(45,38,32,.1); border-radius: 14px; padding: 12px; background: #fff; }
 .segment-row.locked { background: #f2f7f3; border-color: #8ab09a; }
+.segment-row.sync-pending { border-color: #e0a33c; box-shadow: 0 0 0 1px rgba(224,163,60,.25); }
+.sync-badge { font-weight: 700; text-transform: none; letter-spacing: 0; }
+.sync-panel { background: #fff; }
+.sync-panel.has-pending { border-color: rgba(224,139,33,.45) !important; box-shadow: 0 8px 26px rgba(224,139,33,.08); }
+.sync-item { border: 1px solid rgba(45,38,32,.08); border-radius: 12px; padding: 12px 14px; background: #fff; }
+.sync-item.is-pending { border-color: rgba(224,163,60,.55); background: #fdf8ef; }
+.sync-item.is-confirmed { background: #f3f8f4; }
+.sync-item.is-locked { background: #f4f3f1; }
+.master-ref { background: rgba(47,107,69,.07); border: 1px dashed rgba(47,107,69,.35); color: #2f4a39; }
 .preview-frame { margin: 0 auto; background: #fff; border: 10px solid #1f1b18; border-radius: 18px; transition: max-width .25s ease; box-shadow: 0 20px 50px rgba(22,18,15,.18); }
 .preview-frame.desktop { max-width: 920px; border-radius: 12px; }
 .preview-frame.tablet { max-width: 720px; }
